@@ -5,3 +5,4 @@ numpy
 tensorflow==2.19
 matplotlib
 av
+openai
