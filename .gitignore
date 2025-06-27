@@ -6,3 +6,4 @@ skinface/
 train_detection/
 wrinkle/
 face_skin_type/
+.env

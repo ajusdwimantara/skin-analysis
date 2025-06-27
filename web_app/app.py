@@ -8,7 +8,57 @@ from tensorflow.lite.python.interpreter import Interpreter
 from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
 import tensorflow as tf
+import openai
+import os
 
+# LOCAL
+# from dotenv import load_dotenv
+# load_dotenv()  # This will read .env and set the environment variables
+
+
+# # Initialize client
+# client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # or hardcode key for testing
+
+# STREAMLIT
+client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+def generate_skin_report(top_labels):
+    label_text = ', '.join([f'{label}: {prob*100:.2f}%' for label, prob in top_labels])
+
+    # System message to guide GPT's behavior as a dermatologist
+    system_message = {
+        "role": "system",
+        "content": (
+            "You are a professional dermatologist. Your task is to analyze skin condition "
+            "predictions and explain them clearly to non-medical users. Be concise, accurate, "
+            "and informative, while maintaining a friendly and supportive tone."
+        )
+    }
+
+    # User prompt with the predictions
+    user_message = {
+        "role": "user",
+        "content": (
+            f"The following are skin condition predictions with their score indicating how bad they experiencing it (0 will be just a few, 100 will be a lot):\n"
+            f"{label_text}.\n\n"
+            "Write a short paragraph summarizing the skin condition based on these predictions. "
+            "Be informative and user-friendly. "
+            "in the end ask the user to consult with Ori Skin for better explanation and what treatment they should have"
+        )
+    }
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[system_message, user_message],
+            temperature=0.7,
+            max_tokens=200,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ OpenAI API error: {e}"
+
+    
 # Lock for thread safety
 lock = threading.Lock()
 captured_frame = None
@@ -58,7 +108,7 @@ class VideoProcessor(VideoProcessorBase):
         self.frame = img.copy()
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-st.title("📸 Real-time Face Crop + Skin Detection")
+st.title("📸 Skin Analyzer Prototype")
 
 ctx = webrtc_streamer(
     key="stream",
@@ -191,18 +241,21 @@ if ctx.video_processor and st.button("📸 Capture & Detect Face"):
 
                 # Display
                 if top_labels:
-                    st.markdown("### 🧠 Top Skin Type Predictions:")
+                    description = generate_skin_report(top_labels)
+                    st.markdown("### 📋 Skin Condition Summary")
+                    st.markdown(description)
+                    st.markdown("### 🧠 Skin Type Predictions:")
                     for label, prob in top_labels:
                         st.markdown(f"- **{label}**: {prob * 100:.2f}%")
                 else:
-                    st.markdown("⚠️ No confident prediction (≥ 30%) was found.")
+                    st.markdown("⚠️ No confident prediction was found.")
 
 # Show cropped face with detections
 if cropped_face is not None:
-    st.image(cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB), caption="🧐 Cropped Face Detection", use_column_width=True)
+    st.image(cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB), caption="Cropped Face", use_container_width=True)
 
     # Legend
-    st.markdown("### 🔹 Legend")
+    st.markdown("### 🔹 Description")
     patches = [
         Patch(color=np.array(label_colors[name][::-1]) / 255.0, label=name)
         for name in label_colors
