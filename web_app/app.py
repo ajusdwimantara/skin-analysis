@@ -44,7 +44,7 @@ float_input = (input_details[0]['dtype'] == np.float32)
 # Load classification model once
 @st.cache_resource
 def load_model():
-    return tf.keras.models.load_model('classify.keras')
+    return tf.keras.models.load_model('classify.h5')
 
 loaded_model = load_model()
 classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkle']
