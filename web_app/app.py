@@ -17,8 +17,8 @@ cropped_face = None
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 # Labels & Colors
-MODEL_PATH = "../detect.tflite"
-LABEL_PATH = "../labelmap.txt"
+MODEL_PATH = "detect.tflite"
+LABEL_PATH = "labelmap.txt"
 MIN_CONF = 0.2
 with open(LABEL_PATH, 'r') as f:
     labels = [line.strip() for line in f.readlines()]
