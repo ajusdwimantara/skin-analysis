@@ -21,7 +21,7 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 MODEL_PATH = "detect.tflite"
 LABEL_PATH = "labelmap.txt"
 CLASSIFY_MODEL_PATH = "classify2.keras"
-MIN_CONF = 0.2
+MIN_CONF = 0.15
 with open(LABEL_PATH, 'r') as f:
     labels = [line.strip() for line in f.readlines()]
 label_colors = {
@@ -42,7 +42,11 @@ in_width = input_details[0]['shape'][2]
 float_input = (input_details[0]['dtype'] == np.float32)
 
 # Load classification model once
-loaded_model = tf.keras.models.load_model(CLASSIFY_MODEL_PATH)
+@st.cache_resource
+def load_model():
+    return tf.keras.models.load_model('classify.keras')
+
+loaded_model = load_model()
 classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkle']
 
 class VideoProcessor(VideoProcessorBase):
@@ -71,6 +75,40 @@ ctx = webrtc_streamer(
     async_processing=True,
 )
 
+def enhance_skin_image(img):
+    # 1. Convert BGR to LAB color space (better for luminance adjustment)
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    # 2. Apply CLAHE to L-channel for adaptive contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    cl = clahe.apply(l)
+
+    # 3. Merge back the LAB channels
+    lab = cv2.merge((cl, a, b))
+
+    # 4. Convert LAB back to BGR
+    enhanced_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # 5. Sharpen image with a moderate kernel
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5, -1],
+                       [0, -1, 0]])
+    sharpened = cv2.filter2D(enhanced_img, -1, kernel)
+
+    # 6. Increase saturation in HSV color space
+    hsv = cv2.cvtColor(sharpened, cv2.COLOR_BGR2HSV).astype(np.float32)
+    # Increase saturation by 1.3 (30% more), cap max at 255
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.3, 0, 255)
+    # Slightly increase value channel by 1.1 (10% brighter)
+    hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.1, 0, 255)
+    hsv = hsv.astype(np.uint8)
+
+    # 7. Convert back to BGR
+    final_img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    return final_img
+
 # Button to capture + analyze
 if ctx.video_processor and st.button("📸 Capture & Detect Face"):
     with lock:
@@ -83,8 +121,37 @@ if ctx.video_processor and st.button("📸 Capture & Detect Face"):
                 x, y, w, h = faces[0]
                 cropped_face = frame[y:y+h, x:x+w]
 
+                # # Enhance contrast and brightness
+                # alpha = 1  # Contrast control (1.0-3.0)
+                # beta = -10   # Brightness control (0-100)
+                # face_for_detection = cv2.addWeighted(cropped_face, alpha, np.zeros(cropped_face.shape, cropped_face.dtype), 0, beta)
+
+                # # Enhance sharpening
+                # # Create the sharpening kernel
+                # kernel = np.array([[0, -2, 0], [-2, 9, -2], [0, -2, 0]])
+
+                # # Sharpen the image
+                # face_for_detection = cv2.filter2D(face_for_detection, -1, kernel)
+
+                # # Enhance colour
+                # # Convert the image from BGR to HSV color space
+                # image_hsv = cv2.cvtColor(face_for_detection, cv2.COLOR_RGB2HSV)
+
+                # # Adjust the hue, saturation, and value of the image_hsv
+                # # Adjusts the hue by multiplying it by 0.7
+                # image_hsv[:, :, 0] = image_hsv[:, :, 0] * 1.5
+                # # Adjusts the saturation by multiplying it by 1.5
+                # image_hsv[:, :, 1] = image_hsv[:, :, 1] * 1
+                # # Adjusts the value by multiplying it by 0.5
+                # image_hsv[:, :, 2] = image_hsv[:, :, 2] * 0.5
+
+                # # Convert the image back to BGR color space
+                # face_for_detection = cv2.cvtColor(image_hsv, cv2.COLOR_HSV2BGR)
+
+                processed_face = enhance_skin_image(cropped_face)
+
                 # Resize + Normalize for object detection
-                resized = cv2.resize(cropped_face, (in_width, in_height))
+                resized = cv2.resize(processed_face, (in_width, in_height))
                 input_data = np.expand_dims(resized, axis=0)
                 if float_input:
                     input_data = (np.float32(input_data) - 127.5) / 127.5
@@ -105,23 +172,34 @@ if ctx.video_processor and st.button("📸 Capture & Detect Face"):
                         xmax = int(min(w, boxes[i][3] * w))
                         cls = labels[int(classes[i])]
                         color = label_colors.get(cls, (255, 255, 255))
-                        cv2.rectangle(cropped_face, (xmin, ymin), (xmax, ymax), color, 2)
+                        cv2.rectangle(processed_face, (xmin, ymin), (xmax, ymax), color, 2)
 
                 # --- Classification ---
-                resized_face = cv2.resize(cropped_face, (224, 224))
+                resized_face = cv2.resize(processed_face, (224, 224))
                 normalized_face = resized_face.astype(np.float32) / 255.0
                 input_face = np.expand_dims(normalized_face, axis=0)
                 y_test = loaded_model.predict(input_face)
-                top_indices = y_test[0].argsort()[-3:][::-1]
-                top_labels = [(classify_labels[i], y_test[0][i]) for i in top_indices]
 
-                st.markdown("### 🧠 Top Skin Type Predictions:")
-                for label, prob in top_labels:
-                    st.markdown(f"- **{label}**: {prob * 100:.2f}%")
+                # Get top 3 predictions
+                top_indices = y_test[0].argsort()[-3:][::-1]
+
+                # Filter only predictions with prob > 30%
+                top_labels = [
+                    (classify_labels[i], y_test[0][i])
+                    for i in top_indices if y_test[0][i] > 0.3
+                ]
+
+                # Display
+                if top_labels:
+                    st.markdown("### 🧠 Top Skin Type Predictions:")
+                    for label, prob in top_labels:
+                        st.markdown(f"- **{label}**: {prob * 100:.2f}%")
+                else:
+                    st.markdown("⚠️ No confident prediction (≥ 30%) was found.")
 
 # Show cropped face with detections
 if cropped_face is not None:
-    st.image(cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB), caption="🧐 Cropped Face Detection", use_column_width=True)
+    st.image(cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB), caption="🧐 Cropped Face Detection", use_column_width=True)
 
     # Legend
     st.markdown("### 🔹 Legend")
