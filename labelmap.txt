@@ -1,0 +1,5 @@
+acne
+oily
+dry
+wrinkle
+darkspot
