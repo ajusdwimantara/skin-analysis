@@ -103,7 +103,7 @@ classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkl
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.frame = None
-        overlay_path = "../guidance.png"
+        overlay_path = "guidance.png"
         if not os.path.exists(overlay_path):
             print("⚠️ guidance.png NOT FOUND at path:", overlay_path)
         self.overlay_img = cv2.imread(overlay_path, cv2.IMREAD_UNCHANGED)
