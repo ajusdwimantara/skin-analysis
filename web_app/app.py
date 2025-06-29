@@ -13,15 +13,15 @@ import os
 import time
 
 # LOCAL
-from dotenv import load_dotenv
-load_dotenv()  # This will read .env and set the environment variables
+# from dotenv import load_dotenv
+# load_dotenv()  # This will read .env and set the environment variables
 
 
-# Initialize client
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # or hardcode key for testing
+# # Initialize client
+# client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # or hardcode key for testing
 
 # STREAMLIT
-# client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 def generate_skin_report(top_labels):
     label_text = ', '.join([f'{label}: {prob*100:.2f}%' for label, prob in top_labels])
