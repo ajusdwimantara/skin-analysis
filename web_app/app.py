@@ -13,15 +13,15 @@ import os
 import time
 
 # LOCAL
-# from dotenv import load_dotenv
-# load_dotenv()  # This will read .env and set the environment variables
+from dotenv import load_dotenv
+load_dotenv()  # This will read .env and set the environment variables
 
 
-# # Initialize client
-# client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # or hardcode key for testing
+# Initialize client
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # or hardcode key for testing
 
 # STREAMLIT
-client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+# client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 def generate_skin_report(top_labels):
     label_text = ', '.join([f'{label}: {prob*100:.2f}%' for label, prob in top_labels])
@@ -71,7 +71,7 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 # Labels & Colors
 MODEL_PATH = "detect.tflite"
 LABEL_PATH = "labelmap.txt"
-CLASSIFY_MODEL_PATH = "classify2.keras"
+CLASSIFY_MODEL_PATH = "classify.h5"
 MIN_CONF = 0.15
 with open(LABEL_PATH, 'r') as f:
     labels = [line.strip() for line in f.readlines()]
@@ -95,7 +95,7 @@ float_input = (input_details[0]['dtype'] == np.float32)
 # Load classification model once
 @st.cache_resource
 def load_model():
-    return tf.keras.models.load_model('classify.h5')
+    return tf.keras.models.load_model(CLASSIFY_MODEL_PATH)
 
 loaded_model = load_model()
 classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkle']
@@ -103,30 +103,44 @@ classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkl
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.frame = None
-        overlay_path = "guidance.png"
+        overlay_path = "guidance_mobile2.jpeg"
         if not os.path.exists(overlay_path):
             print("⚠️ guidance.png NOT FOUND at path:", overlay_path)
+
         self.overlay_img = cv2.imread(overlay_path, cv2.IMREAD_UNCHANGED)
         if self.overlay_img is None:
-            print("⚠️ guidance.png exists but failed to load (not a valid image or no alpha channel)")
+            print("⚠️ guidance.png exists but failed to load (not a valid image or corrupted)")
+        elif self.overlay_img.shape[2] == 4:
+            print("ℹ️ Detected 4-channel (RGBA) overlay — flattening to RGB.")
+            self.overlay_img = self.flatten_overlay(self.overlay_img)
+        else:
+            print("ℹ️ Detected 3-channel (RGB) overlay — using as is.")
+
+    def flatten_overlay(self, overlay_rgba, background_color=(0, 0, 0)):
+        """Convert RGBA to RGB by blending with a background color."""
+        overlay_rgb = overlay_rgba[:, :, :3].astype(float)
+        alpha = overlay_rgba[:, :, 3].astype(float) / 255.0
+        alpha = alpha[:, :, np.newaxis]  # Shape (H, W, 1)
+
+        bg_color = np.full_like(overlay_rgb, background_color, dtype=float)
+
+        blended = overlay_rgb * alpha + bg_color * (1 - alpha)
+        return blended.astype(np.uint8)
 
     def overlay_guidance(self, bg, ov):
-        ov = cv2.resize(ov, (bg.shape[1], bg.shape[0]))
-        if ov.shape[2] == 4:
-            rgb, alpha = ov[:, :, :3], ov[:, :, 3:] / 255.0
-            return (rgb * alpha + bg * (1 - alpha)).astype(np.uint8)
-        else:
-            # fallback for non-transparent overlays
-            blended = cv2.addWeighted(bg, 0.7, ov, 0.3, 0)
-            return blended
+        ov = cv2.resize(ov, (bg.shape[1], bg.shape[0]))  # Match camera frame
+        return cv2.addWeighted(bg, 0.8, ov, 0.2, 0)  # Semi-transparent blend
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)  # Flip horizontally (mirror view)
+        img = cv2.flip(img, 1)  # Mirror for webcam effect
         self.frame = img.copy()
+
         if self.overlay_img is not None:
             img = self.overlay_guidance(img, self.overlay_img)
+
         return av.VideoFrame.from_ndarray(img, format="bgr24")
+
 
 st.title("📸 Skin Analyzer Prototype")
 
@@ -144,7 +158,7 @@ if not st.session_state.stream_started:
         st.session_state.stream_started = True
 
 ctx = None       
-if st.session_state.stream_started:
+if st.session_state.stream_started and not st.session_state.face_detected:
     ctx = webrtc_streamer(
         key="stream",
         mode=WebRtcMode.SENDRECV,
@@ -195,20 +209,24 @@ def enhance_skin_image(img):
     return final_img
         
 # Button to capture + analyze
-if ctx is not None and ctx.video_processor and st.button("📸 Capture & Detect Face"):
-    with lock:
-        frame = ctx.video_processor.frame
-        if frame is not None:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+# Only show the capture button if face hasn't been detected yet
+if not st.session_state.face_detected and ctx is not None and ctx.video_processor:
+    if st.button("📸 Capture & Detect Face"):
+        with lock:
+            frame = ctx.video_processor.frame
+            if frame is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, 1.1, 4)
 
-            if len(faces) > 0:
-                x, y, w, h = faces[0]
-                cropped_face = frame[y:y+h, x:x+w]
+                if len(faces) > 0:
+                    x, y, w, h = faces[0]
+                    cropped_face = frame[y:y+h, x:x+w]
 
-                st.session_state.captured_face = cropped_face
-                st.session_state.face_detected = True
-                st.session_state.analyze = False
+                    st.session_state.captured_face = cropped_face
+                    st.session_state.face_detected = True
+                    st.session_state.analyze = False
+
+                    st.rerun()
 
                 # # Enhance contrast and brightness
                 # alpha = 1  # Contrast control (1.0-3.0)
