@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import openai
 import os
+import time
 
 # LOCAL
 # from dotenv import load_dotenv
@@ -102,28 +103,62 @@ classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkl
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.frame = None
+        overlay_path = "../guidance.png"
+        if not os.path.exists(overlay_path):
+            print("⚠️ guidance.png NOT FOUND at path:", overlay_path)
+        self.overlay_img = cv2.imread(overlay_path, cv2.IMREAD_UNCHANGED)
+        if self.overlay_img is None:
+            print("⚠️ guidance.png exists but failed to load (not a valid image or no alpha channel)")
+
+    def overlay_guidance(self, bg, ov):
+        ov = cv2.resize(ov, (bg.shape[1], bg.shape[0]))
+        if ov.shape[2] == 4:
+            rgb, alpha = ov[:, :, :3], ov[:, :, 3:] / 255.0
+            return (rgb * alpha + bg * (1 - alpha)).astype(np.uint8)
+        else:
+            # fallback for non-transparent overlays
+            blended = cv2.addWeighted(bg, 0.7, ov, 0.3, 0)
+            return blended
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)  # Flip horizontally (mirror view)
         self.frame = img.copy()
+        if self.overlay_img is not None:
+            img = self.overlay_guidance(img, self.overlay_img)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 st.title("📸 Skin Analyzer Prototype")
 
-ctx = webrtc_streamer(
-    key="stream",
-    mode=WebRtcMode.SENDRECV,
-    video_processor_factory=VideoProcessor,
-    media_stream_constraints={
-        "video": {
-            "width": {"ideal": 1920},
-            "height": {"ideal": 1080},
-            "frameRate": {"ideal": 30}
+if 'stream_started' not in st.session_state:
+    st.session_state.stream_started = False
+if 'captured_face' not in st.session_state:
+    st.session_state.captured_face = None
+if 'face_detected' not in st.session_state:
+    st.session_state.face_detected = False
+if 'analyze' not in st.session_state:
+    st.session_state.analyze = False
+
+if not st.session_state.stream_started:
+    if st.button("📹 Start Camera"):
+        st.session_state.stream_started = True
+
+ctx = None       
+if st.session_state.stream_started:
+    ctx = webrtc_streamer(
+        key="stream",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 1920},
+                "height": {"ideal": 1080},
+                "frameRate": {"ideal": 30}
+            },
+            "audio": False
         },
-        "audio": False
-    },
-    async_processing=True,
-)
+        async_processing=True,
+    )
 
 def enhance_skin_image(img):
     # 1. Convert BGR to LAB color space (better for luminance adjustment)
@@ -158,9 +193,9 @@ def enhance_skin_image(img):
     final_img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
     return final_img
-
+        
 # Button to capture + analyze
-if ctx.video_processor and st.button("📸 Capture & Detect Face"):
+if ctx is not None and ctx.video_processor and st.button("📸 Capture & Detect Face"):
     with lock:
         frame = ctx.video_processor.frame
         if frame is not None:
@@ -170,6 +205,10 @@ if ctx.video_processor and st.button("📸 Capture & Detect Face"):
             if len(faces) > 0:
                 x, y, w, h = faces[0]
                 cropped_face = frame[y:y+h, x:x+w]
+
+                st.session_state.captured_face = cropped_face
+                st.session_state.face_detected = True
+                st.session_state.analyze = False
 
                 # # Enhance contrast and brightness
                 # alpha = 1  # Contrast control (1.0-3.0)
@@ -198,69 +237,123 @@ if ctx.video_processor and st.button("📸 Capture & Detect Face"):
                 # # Convert the image back to BGR color space
                 # face_for_detection = cv2.cvtColor(image_hsv, cv2.COLOR_HSV2BGR)
 
-                processed_face = enhance_skin_image(cropped_face)
+                # COMMENT DULU
+                
+if st.session_state.face_detected and st.session_state.captured_face is not None:
+    st.image(st.session_state.captured_face, channels="BGR", caption="Captured Face")
 
-                # Resize + Normalize for object detection
-                resized = cv2.resize(processed_face, (in_width, in_height))
-                input_data = np.expand_dims(resized, axis=0)
-                if float_input:
-                    input_data = (np.float32(input_data) - 127.5) / 127.5
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🔄 Retake"):
+            st.session_state.face_detected = False
+            st.session_state.captured_face = None
+            st.session_state.analyze = False
+            st.rerun()  # 👈 Force update
 
-                interpreter.set_tensor(input_details[0]['index'], input_data)
-                interpreter.invoke()
+    with col2:
+        if st.button("✅ OK"):
+            st.session_state.analyze = True
 
-                boxes = interpreter.get_tensor(output_details[1]['index'])[0]
-                classes = interpreter.get_tensor(output_details[3]['index'])[0]
-                scores = interpreter.get_tensor(output_details[0]['index'])[0]
+    with col3:
+        if st.button("❌ Cancel"):
+            st.session_state.face_detected = False
+            st.session_state.captured_face = None
+            st.session_state.analyze = False
+            st.session_state.stream_started = False  # 👈 if you want to go back to "Start Camera"
+            st.info("Canceled.")
+            st.rerun()  # 👈 Force rerun to reflect reset
 
-                # Draw object detection results
-                for i in range(len(scores)):
-                    if scores[i] > MIN_CONF:
-                        ymin = int(max(1, boxes[i][0] * h))
-                        xmin = int(max(1, boxes[i][1] * w))
-                        ymax = int(min(h, boxes[i][2] * h))
-                        xmax = int(min(w, boxes[i][3] * w))
-                        cls = labels[int(classes[i])]
-                        color = label_colors.get(cls, (255, 255, 255))
-                        cv2.rectangle(processed_face, (xmin, ymin), (xmax, ymax), color, 2)
+if st.session_state.analyze and st.session_state.captured_face is not None:
+    # st.success("Analyzing…")
+    with st.spinner("🧠 Analyzing your skin condition..."):
+        progress_bar = st.progress(0)
 
-                # --- Classification ---
-                resized_face = cv2.resize(processed_face, (224, 224))
-                normalized_face = resized_face.astype(np.float32) / 255.0
-                input_face = np.expand_dims(normalized_face, axis=0)
-                y_test = loaded_model.predict(input_face)
+        cropped_face = st.session_state.captured_face
+        time.sleep(0.2)
+        progress_bar.progress(10, text="🔧 Enhancing image...")
+        processed_face = enhance_skin_image(cropped_face)
 
-                # Get top 3 predictions
-                top_indices = y_test[0].argsort()[-3:][::-1]
+        time.sleep(0.2)
+        progress_bar.progress(30, text="📐 Resizing + Normalizing...")
+        resized = cv2.resize(processed_face, (in_width, in_height))
+        input_data = np.expand_dims(resized, axis=0)
+        if float_input:
+            input_data = (np.float32(input_data) - 127.5) / 127.5
 
-                # Filter only predictions with prob > 30%
-                top_labels = [
-                    (classify_labels[i], y_test[0][i])
-                    for i in top_indices if y_test[0][i] > 0.3
-                ]
+        time.sleep(0.2)
+        progress_bar.progress(50, text="📦 Running detection model...")
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
 
-                # Display
-                if top_labels:
-                    description = generate_skin_report(top_labels)
-                    st.markdown("### 📋 Skin Condition Summary")
-                    st.markdown(description)
-                    st.markdown("### 🧠 Skin Type Predictions:")
-                    for label, prob in top_labels:
-                        st.markdown(f"- **{label}**: {prob * 100:.2f}%")
-                else:
-                    st.markdown("⚠️ No confident prediction was found.")
+        boxes = interpreter.get_tensor(output_details[1]['index'])[0]
+        classes = interpreter.get_tensor(output_details[3]['index'])[0]
+        scores = interpreter.get_tensor(output_details[0]['index'])[0]
+
+        h, w, _ = processed_face.shape
+        for i in range(len(scores)):
+            if scores[i] > MIN_CONF:
+                ymin = int(max(1, boxes[i][0] * h))
+                xmin = int(max(1, boxes[i][1] * w))
+                ymax = int(min(h, boxes[i][2] * h))
+                xmax = int(min(w, boxes[i][3] * w))
+                cls = labels[int(classes[i])]
+                color = label_colors.get(cls, (255, 255, 255))
+                cv2.rectangle(processed_face, (xmin, ymin), (xmax, ymax), color, 2)
+
+        time.sleep(0.2)
+        progress_bar.progress(70, text="🧠 Classifying skin type...")
+        resized_face = cv2.resize(processed_face, (224, 224))
+        normalized_face = resized_face.astype(np.float32) / 255.0
+        input_face = np.expand_dims(normalized_face, axis=0)
+        y_test = loaded_model.predict(input_face)
+
+        top_indices = y_test[0].argsort()[-3:][::-1]
+        top_labels = [
+            (classify_labels[i], y_test[0][i])
+            for i in top_indices if y_test[0][i] > 0.3
+        ]
+
+        time.sleep(0.2)
+        progress_bar.progress(90, text="📋 Generating report...")
+        if top_labels:
+            description = generate_skin_report(top_labels)
+            st.markdown("### 📋 Skin Condition Summary")
+            st.markdown(description)
+            st.markdown("### 🧠 Skin Type Predictions:")
+            for label, prob in top_labels:
+                st.markdown(f"- **{label}**: {prob * 100:.2f}%")
+        else:
+            st.markdown("⚠️ No confident prediction was found.")
+
+        st.image(cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB), caption="Cropped Face", use_container_width=True)
+
+        # Legend
+        st.markdown("### 🔹 Description")
+        patches = [
+            Patch(color=np.array(label_colors[name][::-1]) / 255.0, label=name)
+            for name in label_colors
+        ]
+        fig = plt.figure()
+        plt.legend(handles=patches, loc='center', ncol=3)
+        plt.axis('off')
+        st.pyplot(fig)
+
+        time.sleep(0.2)
+        progress_bar.progress(100, text="✅ Done!")
+
+
 
 # Show cropped face with detections
-if cropped_face is not None:
-    st.image(cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB), caption="Cropped Face", use_container_width=True)
+# if cropped_face is not None:
+    # st.image(cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB), caption="Cropped Face", use_container_width=True)
 
-    # Legend
-    st.markdown("### 🔹 Description")
-    patches = [
-        Patch(color=np.array(label_colors[name][::-1]) / 255.0, label=name)
-        for name in label_colors
-    ]
-    fig = plt.figure()
-    plt.legend(handles=patches, loc='center', ncol=3)
-    plt.axis('off')
-    st.pyplot(fig)
+    # # Legend
+    # st.markdown("### 🔹 Description")
+    # patches = [
+    #     Patch(color=np.array(label_colors[name][::-1]) / 255.0, label=name)
+    #     for name in label_colors
+    # ]
+    # fig = plt.figure()
+    # plt.legend(handles=patches, loc='center', ncol=3)
+    # plt.axis('off')
+    # st.pyplot(fig)
