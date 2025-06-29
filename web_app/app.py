@@ -103,18 +103,8 @@ classify_labels = ['acne', 'darkspot', 'dry', 'normal', 'oily', 'other', 'wrinkl
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.frame = None
-        overlay_path = "guidance_mobile2.jpeg"
-        if not os.path.exists(overlay_path):
-            print("⚠️ guidance.png NOT FOUND at path:", overlay_path)
-
-        self.overlay_img = cv2.imread(overlay_path, cv2.IMREAD_UNCHANGED)
-        if self.overlay_img is None:
-            print("⚠️ guidance.png exists but failed to load (not a valid image or corrupted)")
-        elif self.overlay_img.shape[2] == 4:
-            print("ℹ️ Detected 4-channel (RGBA) overlay — flattening to RGB.")
-            self.overlay_img = self.flatten_overlay(self.overlay_img)
-        else:
-            print("ℹ️ Detected 3-channel (RGB) overlay — using as is.")
+        self.overlay_img = None
+        self.overlay_loaded = False  # Delay loading until we get frame dimensions
 
     def flatten_overlay(self, overlay_rgba, background_color=(0, 0, 0)):
         """Convert RGBA to RGB by blending with a background color."""
@@ -123,9 +113,34 @@ class VideoProcessor(VideoProcessorBase):
         alpha = alpha[:, :, np.newaxis]  # Shape (H, W, 1)
 
         bg_color = np.full_like(overlay_rgb, background_color, dtype=float)
-
         blended = overlay_rgb * alpha + bg_color * (1 - alpha)
         return blended.astype(np.uint8)
+
+    def load_overlay(self, frame_shape):
+        h, w = frame_shape[:2]
+        aspect_ratio = w / h
+        print(f"📐 Frame size: {w}x{h}, Aspect ratio: {aspect_ratio:.2f}")
+
+        if aspect_ratio < 1.0:
+            overlay_path = "guidance_mobile.png"
+        else:
+            overlay_path = "guidance.png"
+
+        if not os.path.exists(overlay_path):
+            print(f"⚠️ {overlay_path} NOT FOUND")
+            return
+
+        overlay = cv2.imread(overlay_path, cv2.IMREAD_UNCHANGED)
+        if overlay is None:
+            print(f"⚠️ {overlay_path} exists but failed to load")
+        elif overlay.shape[2] == 4:
+            print(f"ℹ️ {overlay_path}: Detected RGBA — flattening")
+            overlay = self.flatten_overlay(overlay)
+        else:
+            print(f"ℹ️ {overlay_path}: Detected RGB — using as is")
+
+        self.overlay_img = overlay
+        self.overlay_loaded = True
 
     def overlay_guidance(self, bg, ov):
         ov = cv2.resize(ov, (bg.shape[1], bg.shape[0]))  # Match camera frame
@@ -135,6 +150,10 @@ class VideoProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)  # Mirror for webcam effect
         self.frame = img.copy()
+
+        # Load overlay dynamically once we have frame size
+        if not self.overlay_loaded:
+            self.load_overlay(img.shape)
 
         if self.overlay_img is not None:
             img = self.overlay_guidance(img, self.overlay_img)
