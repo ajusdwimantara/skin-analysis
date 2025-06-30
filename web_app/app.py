@@ -11,17 +11,22 @@ import tensorflow as tf
 import openai
 import os
 import time
+from twilio.rest import Client
 
 # LOCAL
 # from dotenv import load_dotenv
 # load_dotenv()  # This will read .env and set the environment variables
 
+# account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+# auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
 # # Initialize client
 # client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # or hardcode key for testing
 
 # STREAMLIT
 client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+account_sid=os.environ["TWILIO_ACCOUNT_SID"]
+auth_token=os.environ["TWILIO_AUTH_TOKEN"]
 
 def generate_skin_report(top_labels):
     label_text = ', '.join([f'{label}: {prob*100:.2f}%' for label, prob in top_labels])
@@ -176,12 +181,30 @@ if not st.session_state.stream_started:
     if st.button("📹 Start Camera"):
         st.session_state.stream_started = True
 
-ctx = None       
+ctx = None
+
+# --- Token generator with caching ---
+def get_twilio_token():
+    if "twilio_token" not in st.session_state:
+        twilio_client = Client(account_sid, auth_token)
+        token = twilio_client.tokens.create()
+        st.session_state.twilio_token = token
+    return st.session_state.twilio_token
+
+# Get ICE servers only if needed
+token = get_twilio_token()
+# Extract ICE servers
+ice_servers = token.ice_servers
+rtc_config = {
+    "iceServers": ice_servers
+}
+
 if st.session_state.stream_started and not st.session_state.face_detected:
     ctx = webrtc_streamer(
         key="stream",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=VideoProcessor,
+        rtc_configuration=rtc_config,
         media_stream_constraints={
             "video": {
                 "width": {"ideal": 1920},
