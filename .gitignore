@@ -1,6 +1,6 @@
 dataset/
 dataset_object_detection/
-face skin type/
+face_skin_type/
 saved_model/
 skinface/
 train_detection/
