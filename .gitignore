@@ -1,9 +1,8 @@
 dataset/
 dataset_object_detection/
-face_skin_type/
+face skin type/
 saved_model/
 skinface/
 train_detection/
 wrinkle/
-face_skin_type/
 .env
